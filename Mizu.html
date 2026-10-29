@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game 2.5D - Mizu78</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; }
+        
+        /* Layar Loading */
+        #loading { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #87CEEB; display: flex; justify-content: center; align-items: center;
+            flex-direction: column; font-family: sans-serif; font-size: 24px; color: #333; font-weight: bold;
+            z-index: 10; transition: opacity 0.5s;
+        }
+        #error { 
+            position: absolute; bottom: 20px; left: 20px; right: 20px;
+            color: white; background: #e74c3c; padding: 15px; border-radius: 8px;
+            display: none; font-family: sans-serif; text-align: center;
+        }
+
+        /* UI Instruksi */
+        #ui {
+            position: absolute; bottom: 20px; width: 100%; text-align: center;
+            font-family: sans-serif; color: white; text-shadow: 1px 1px 3px black;
+            pointer-events: none; font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Memuat Karakter Mizu78...</div>
+    <div id="error">Gagal memuat model. Periksa koneksi internet atau link GitHub.</div>
+    <div id="ui">Panah Kiri/Kanan (A/D) untuk Lari | Spasi untuk Lompat</div>
+
+    <!-- Import Library Three.js -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // ==========================================
+        // 1. SETUP SCENE (Ruang 3D)
+        // ==========================================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 50); // Efek kabut untuk kedalaman
+
+        // Kamera 2.5D (Menyamping agak ke depan)
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(6, 4, 8); 
+
+        // Renderer
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true; // Aktifkan bayangan
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // ==========================================
+        // 2. PENCAHAYAAN (LIGHTING)
+        // ==========================================
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
+        scene.add(hemiLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        dirLight.shadow.camera.top = 10;
+        dirLight.shadow.camera.bottom = -10;
+        dirLight.shadow.camera.left = -10;
+        dirLight.shadow.camera.right = 10;
+        scene.add(dirLight);
+
+        // ==========================================
+        // 3. LANTAI (GROUND)
+        // ==========================================
+        const groundGeo = new THREE.PlaneGeometry(200, 20);
+        const groundMat = new THREE.MeshStandardMaterial({ 
+            color: 0x3cb371, 
+            roughness: 0.8 
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Garis-garis lantai agar terlihat bergerak
+        const gridHelper = new THREE.GridHelper(200, 50, 0x000000, 0x000000);
+        gridHelper.material.opacity = 0.2;
+        gridHelper.material.transparent = true;
+        gridHelper.position.y = 0.01;
+        scene.add(gridHelper);
+
+        // ==========================================
+        // 4. VARIABEL KONTROL & FISIKA
+        // ==========================================
+        let player;
+        let mixer;
+        let actions = {};
+        let activeAction;
+        
+        const clock = new THREE.Clock();
+        const velocity = new THREE.Vector3();
+        
+        let isGrounded = true;
+        const GRAVITY = 30;
+        const JUMP_FORCE = 12;
+        const MOVE_SPEED = 6;
+        const GROUND_Y = 0;
+
+        // ==========================================
+        // 5. LOAD MODEL GLB DARI GITHUB
+        // ==========================================
+        const loader = new GLTFLoader();
+        
+        // Menggunakan link RAW dari GitHub Anda
+        const MODEL_URL = 'https://raw.githubusercontent.com/preski08/A-game3/bd3379468396133329f94031253121fdf70ec761/Mizu78.glb';
+
+        loader.load(MODEL_URL, (gltf) => {
+            // Sembunyikan layar loading
+            const loadingScreen = document.getElementById('loading');
+            loadingScreen.style.opacity = '0';
+            setTimeout(() => loadingScreen.style.display = 'none', 500);
+
+            player = gltf.scene;
+            
+            // Aktifkan bayangan pada karakter
+            player.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    // Perbaiki material agar tidak gelap
+                    if (child.material) {
+                        child.material.metalness = 0.2;
+                        child.material.roughness = 0.8;
+                    }
+                }
+            });
+
+            // --- PENYESUAIAN OTOMATIS (AUTO SCALE) ---
+            const box = new THREE.Box3().setFromObject(player);
+            const size = box.getSize(new THREE.Vector3());
+            
+            // Cek jika model terlalu kecil atau terlalu besar, sesuaikan tingginya jadi ~2 unit
+            if (size.y > 0.1) {
+                const scaleFactor = 2 / size.y;
+                player.scale.set(scaleFactor, scaleFactor, scaleFactor);
+            }
+
+            // Letakkan tepat di atas lantai
+            const newBox = new THREE.Box3().setFromObject(player);
+            player.position.y = -newBox.min.y; 
+            player.position.x = 0;
+
+            scene.add(player);
+
+            // --- SETUP ANIMASI ---
+            if (gltf.animations && gltf.animations.length > 0) {
+                mixer = new THREE.AnimationMixer(player);
+                
+                // Simpan semua animasi ke dalam variabel
+                gltf.animations.forEach((clip) => {
+                    actions[clip.name.toLowerCase()] = mixer.clipAction(clip);
+                });
+                
+                console.log("Animasi yang tersedia:", Object.keys(actions));
+
+                // Cari animasi "Idle" atau pakai yang pertama
+                let defaultAnim = Object.keys(actions)[0];
+                if (actions['idle']) defaultAnim = 'idle';
+                
+                if (actions[defaultAnim]) {
+                    activeAction = actions[defaultAnim];
+                    activeAction.play();
+                }
+            }
+
+        }, 
+        (xhr) => {
+            // Update Progress Loading
+            if (xhr.total) {
+                const percent = Math.round((xhr.loaded / xhr.total) * 100);
+                document.getElementById('loading').innerText = `Memuat Karakter... ${percent}%`;
+            }
+        }, 
+        (error) => {
+            // Tampilkan error jika gagal
+            console.error(error);
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+        });
+
+        // ==========================================
+        // 6. KONTROL INPUT (KEYBOARD)
+        // ==========================================
+        const keys = {};
+        window.addEventListener('keydown', (e) => keys[e.code] = true);
+        window.addEventListener('keyup', (e) => keys[e.code] = false);
+
+        // Fungsi untuk mengganti animasi dengan mulus
+        function fadeToAction(name, duration) {
+            if (!actions[name]) return;
+            const nextAction = actions[name];
+            if (nextAction !== activeAction) {
+                if (activeAction) activeAction.fadeOut(duration);
+                nextAction.reset().fadeIn(duration).play();
+                activeAction = nextAction;
+            }
+        }
+
+        // ==========================================
+        // 7. GAME LOOP (ANIMASI UTAMA)
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            if (player && mixer) {
+                // Cek Input Gerak
+                let isMoving = false;
+                velocity.x = 0;
+                
+                if (keys['ArrowLeft'] || keys['KeyA']) {
+                    velocity.x = -MOVE_SPEED;
+                    player.rotation.y = -Math.PI / 2; // Hadap kiri
+                    isMoving = true;
+                }
+                if (keys['ArrowRight'] || keys['KeyD']) {
+                    velocity.x = MOVE_SPEED;
+                    player.rotation.y = Math.PI / 2;  // Hadap kanan
+                    isMoving = true;
+                }
+
+                // Cek Input Lompat
+                if ((keys['Space'] || keys['ArrowUp'] || keys['KeyW']) && isGrounded) {
+                    velocity.y = JUMP_FORCE;
+                    isGrounded = false;
+                }
+
+                // Terapkan Gravitasi
+                velocity.y -= GRAVITY * delta;
+
+                // Pindahkan Karakter
+                player.position.x += velocity.x * delta;
+                player.position.y += velocity.y * delta;
+
+                // Deteksi Lantai
+                if (player.position.y <= GROUND_Y) {
+                    player.position.y = GROUND_Y;
+                    velocity.y = 0;
+                    isGrounded = true;
+                }
+
+                // --- UPDATE ANIMASI BERDASARKAN AKSI ---
+                if (isGrounded) {
+                    if (isMoving) {
+                        // Jika ada animasi lari, pakai itu. Jika tidak, tetap idle.
+                        if (actions['run']) fadeToAction('run', 0.2);
+                        else if (actions['walk']) fadeToAction('walk', 0.2);
+                    } else {
+                        // Jika diam
+                        if (actions['idle']) fadeToAction('idle', 0.2);
+                    }
+                } else {
+                    // Jika sedang melompat
+                    if (actions['jump']) fadeToAction('jump', 0.1);
+                    else if (actions['fall']) fadeToAction('fall', 0.1);
+                }
+
+                // Update animasi
+                mixer.update(delta);
+
+                // --- KAMERA MENGIKUTI PEMAIN (SMOOTH FOLLOW) ---
+                const targetCamX = player.position.x + 6;
+                const targetCamY = player.position.y + 4;
+                camera.position.x += (targetCamX - camera.position.x) * 0.05;
+                camera.position.y += (targetCamY - camera.position.y) * 0.05;
+                camera.lookAt(player.position.x, player.position.y + 1, 0);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // ==========================================
+        // 8. HANDLE RESIZE LAYAR
+        // ==========================================
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
